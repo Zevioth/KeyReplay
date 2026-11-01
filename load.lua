@@ -393,6 +393,8 @@ local refreshSelectedPanel
 local updatePlayheadVisual
 local updateTimeDisplays
 local seekTo
+local refreshRuler
+local resetJoystick
 
 local function selectKeyframe(kf)
 	selectedKeyframe = kf
@@ -523,6 +525,8 @@ end
 ----------------------------------------------------------------------
 -- GUI CONSTRUCTION
 ----------------------------------------------------------------------
+local function buildUI()
+
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "CameraKeyframeEditorGui"
 screenGui.ResetOnSpawn = false
@@ -896,7 +900,7 @@ updateTimeDisplays = function()
 end
 
 local rulerMarks = {}
-local function refreshRuler()
+refreshRuler = function()
 	for _, m in ipairs(rulerMarks) do
 		m:Destroy()
 	end
@@ -1158,7 +1162,7 @@ joystickKnob.ZIndex = 9
 joystickKnob.Parent = joystickBase
 addCorner(joystickKnob, 15)
 
-local function resetJoystick()
+resetJoystick = function()
 	joystickActive = false
 	joystickId = nil
 	joystickDir = Vector3.new(0, 0, 0)
@@ -1364,6 +1368,57 @@ reopenBubble.Parent = screenGui
 addCorner(reopenBubble, 24)
 addStroke(reopenBubble, COLORS.border, 1)
 
+	return {
+		rootFrame = rootFrame,
+		playBtn = playBtn,
+		pauseBtn = pauseBtn,
+		stopBtn = stopBtn,
+		addKeyBtn = addKeyBtn,
+		settingsBtn = settingsBtn,
+		minimizeBtn = minimizeBtn,
+		closeBtn = closeBtn,
+		posXBox = posXBox,
+		posYBox = posYBox,
+		posZBox = posZBox,
+		rotXBox = rotXBox,
+		rotYBox = rotYBox,
+		rotZBox = rotZBox,
+		fovBox = fovBox,
+		timeBox = timeBox,
+		applyFieldsBtn = applyFieldsBtn,
+		snapToCameraBtn = snapToCameraBtn,
+		duplicateBtn = duplicateBtn,
+		deleteBtn = deleteBtn,
+		clearAllBtn = clearAllBtn,
+		prevKeyBtn = prevKeyBtn,
+		restartBtn = restartBtn,
+		nextKeyBtn = nextKeyBtn,
+		durationBox = durationBox,
+		speedBox = speedBox,
+		loopBtn = loopBtn,
+		easingBtn = easingBtn,
+		settingsBackdrop = settingsBackdrop,
+		settingsCloseBtn = settingsCloseBtn,
+		camSpeedBox = camSpeedBox,
+		sensitivityBox = sensitivityBox,
+		defaultFovBox = defaultFovBox,
+		settingsSpeedBox = settingsSpeedBox,
+		settingsEasingBtn = settingsEasingBtn,
+		settingsLoopBtn = settingsLoopBtn,
+		applySettingsBtn = applySettingsBtn,
+		exportBtn = exportBtn,
+		jsonBox = jsonBox,
+		importBtn = importBtn,
+		dataStatusLabel = dataStatusLabel,
+		minimizedBar = minimizedBar,
+		restoreBtn = restoreBtn,
+		minimizedCloseBtn = minimizedCloseBtn,
+		reopenBubble = reopenBubble,
+	}
+end
+
+local UI = buildUI()
+
 ----------------------------------------------------------------------
 -- EDITOR OPEN / CLOSE / MINIMIZE LOGIC
 ----------------------------------------------------------------------
@@ -1477,9 +1532,9 @@ local function openEditor()
 	editorOpen = true
 	editorOpenRef = true
 	editorMinimized = false
-	rootFrame.Visible = true
-	minimizedBar.Visible = false
-	reopenBubble.Visible = false
+	UI.rootFrame.Visible = true
+	UI.minimizedBar.Visible = false
+	UI.reopenBubble.Visible = false
 	camera = Workspace.CurrentCamera
 	applyCameraScriptable()
 	camera.FieldOfView = currentFOV
@@ -1501,10 +1556,10 @@ local function closeEditor()
 	editorMinimized = false
 	isPlaying = false
 	isPaused = false
-	rootFrame.Visible = false
-	minimizedBar.Visible = false
-	reopenBubble.Visible = true
-	settingsBackdrop.Visible = false
+	UI.rootFrame.Visible = false
+	UI.minimizedBar.Visible = false
+	UI.reopenBubble.Visible = true
+	UI.settingsBackdrop.Visible = false
 	stopRenderLoop()
 	restoreOriginalCamera()
 	-- Reset transient input state so nothing "sticks" after closing.
@@ -1518,9 +1573,9 @@ end
 local function minimizeEditor()
 	if not editorOpen then return end
 	editorMinimized = true
-	rootFrame.Visible = false
-	minimizedBar.Visible = true
-	settingsBackdrop.Visible = false
+	UI.rootFrame.Visible = false
+	UI.minimizedBar.Visible = true
+	UI.settingsBackdrop.Visible = false
 	-- Keep the render loop running so the camera stays scriptable and
 	-- in place while minimized, but movement input still works if desired.
 end
@@ -1528,8 +1583,8 @@ end
 local function restoreFromMinimized()
 	if not editorOpen then return end
 	editorMinimized = false
-	rootFrame.Visible = true
-	minimizedBar.Visible = false
+	UI.rootFrame.Visible = true
+	UI.minimizedBar.Visible = false
 end
 
 ----------------------------------------------------------------------
@@ -1645,33 +1700,33 @@ local function exportKeyframes()
 		return HttpService:JSONEncode(data)
 	end)
 	if ok then
-		jsonBox.Text = json
-		dataStatusLabel.Text = "Exported " .. #keyframes .. " keyframe(s)."
-		dataStatusLabel.TextColor3 = COLORS.success
+		UI.jsonBox.Text = json
+		UI.dataStatusLabel.Text = "Exported " .. #keyframes .. " keyframe(s)."
+		UI.dataStatusLabel.TextColor3 = COLORS.success
 	else
-		dataStatusLabel.Text = "Export failed."
-		dataStatusLabel.TextColor3 = COLORS.danger
+		UI.dataStatusLabel.Text = "Export failed."
+		UI.dataStatusLabel.TextColor3 = COLORS.danger
 	end
 end
 
 local function importKeyframes()
-	local raw = jsonBox.Text
+	local raw = UI.jsonBox.Text
 	if not raw or raw == "" then
-		dataStatusLabel.Text = "Nothing to import."
-		dataStatusLabel.TextColor3 = COLORS.danger
+		UI.dataStatusLabel.Text = "Nothing to import."
+		UI.dataStatusLabel.TextColor3 = COLORS.danger
 		return
 	end
 	local ok, result = pcall(function()
 		return HttpService:JSONDecode(raw)
 	end)
 	if not ok or type(result) ~= "table" then
-		dataStatusLabel.Text = "Invalid JSON - import cancelled."
-		dataStatusLabel.TextColor3 = COLORS.danger
+		UI.dataStatusLabel.Text = "Invalid JSON - import cancelled."
+		UI.dataStatusLabel.TextColor3 = COLORS.danger
 		return
 	end
 	if type(result.keyframes) ~= "table" then
-		dataStatusLabel.Text = "JSON missing 'keyframes' array."
-		dataStatusLabel.TextColor3 = COLORS.danger
+		UI.dataStatusLabel.Text = "JSON missing 'keyframes' array."
+		UI.dataStatusLabel.TextColor3 = COLORS.danger
 		return
 	end
 
@@ -1701,8 +1756,8 @@ local function importKeyframes()
 	end
 
 	if #newKeyframes == 0 then
-		dataStatusLabel.Text = "No valid keyframes found in JSON."
-		dataStatusLabel.TextColor3 = COLORS.danger
+		UI.dataStatusLabel.Text = "No valid keyframes found in JSON."
+		UI.dataStatusLabel.TextColor3 = COLORS.danger
 		return
 	end
 
@@ -1712,20 +1767,20 @@ local function importKeyframes()
 
 	if type(result.duration) == "number" and result.duration > 0 then
 		duration = result.duration
-		durationBox.Text = tostring(duration)
+		UI.durationBox.Text = tostring(duration)
 	end
 	if type(result.loop) == "boolean" then
 		loopPlayback = result.loop
-		loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
-		settingsLoopBtn.Text = loopPlayback and "On" or "Off"
+		UI.loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
+		UI.settingsLoopBtn.Text = loopPlayback and "On" or "Off"
 	end
 	if type(result.easing) == "string" then
 		for i, mode in ipairs(EASING_MODES) do
 			if mode == result.easing then
 				easingModeIndex = i
 				easingMode = mode
-				easingBtn.Text = "Ease: " .. easingMode
-				settingsEasingBtn.Text = easingMode
+				UI.easingBtn.Text = "Ease: " .. easingMode
+				UI.settingsEasingBtn.Text = easingMode
 				break
 			end
 		end
@@ -1737,8 +1792,8 @@ local function importKeyframes()
 	refreshSelectedPanel()
 	seekTo(0)
 
-	dataStatusLabel.Text = "Imported " .. #newKeyframes .. " keyframe(s)."
-	dataStatusLabel.TextColor3 = COLORS.success
+	UI.dataStatusLabel.Text = "Imported " .. #newKeyframes .. " keyframe(s)."
+	UI.dataStatusLabel.TextColor3 = COLORS.success
 end
 
 ----------------------------------------------------------------------
@@ -1746,47 +1801,47 @@ end
 ----------------------------------------------------------------------
 
 -- Toolbar
-playBtn.Activated:Connect(function()
+UI.playBtn.Activated:Connect(function()
 	if isPlaying and isPaused then
 		resumePlayback()
 	else
 		playPlayback()
 	end
 end)
-pauseBtn.Activated:Connect(pausePlayback)
-stopBtn.Activated:Connect(stopPlayback)
-addKeyBtn.Activated:Connect(function()
+UI.pauseBtn.Activated:Connect(pausePlayback)
+UI.stopBtn.Activated:Connect(stopPlayback)
+UI.addKeyBtn.Activated:Connect(function()
 	addKeyframe(currentTime, freeCamCFrame, currentFOV)
 end)
-settingsBtn.Activated:Connect(function()
-	settingsBackdrop.Visible = not settingsBackdrop.Visible
+UI.settingsBtn.Activated:Connect(function()
+	UI.settingsBackdrop.Visible = not UI.settingsBackdrop.Visible
 end)
-minimizeBtn.Activated:Connect(minimizeEditor)
-closeBtn.Activated:Connect(closeEditor)
-restoreBtn.Activated:Connect(restoreFromMinimized)
-minimizedCloseBtn.Activated:Connect(closeEditor)
-reopenBubble.Activated:Connect(openEditor)
+UI.minimizeBtn.Activated:Connect(minimizeEditor)
+UI.closeBtn.Activated:Connect(closeEditor)
+UI.restoreBtn.Activated:Connect(restoreFromMinimized)
+UI.minimizedCloseBtn.Activated:Connect(closeEditor)
+UI.reopenBubble.Activated:Connect(openEditor)
 
 -- Timeline controls
-prevKeyBtn.Activated:Connect(gotoPreviousKeyframe)
-nextKeyBtn.Activated:Connect(gotoNextKeyframe)
-restartBtn.Activated:Connect(restartPlayback)
+UI.prevKeyBtn.Activated:Connect(gotoPreviousKeyframe)
+UI.nextKeyBtn.Activated:Connect(gotoNextKeyframe)
+UI.restartBtn.Activated:Connect(restartPlayback)
 
-loopBtn.Activated:Connect(function()
+UI.loopBtn.Activated:Connect(function()
 	loopPlayback = not loopPlayback
-	loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
-	settingsLoopBtn.Text = loopPlayback and "On" or "Off"
+	UI.loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
+	UI.settingsLoopBtn.Text = loopPlayback and "On" or "Off"
 end)
 
-easingBtn.Activated:Connect(function()
+UI.easingBtn.Activated:Connect(function()
 	easingModeIndex = (easingModeIndex % #EASING_MODES) + 1
 	easingMode = EASING_MODES[easingModeIndex]
-	easingBtn.Text = "Ease: " .. easingMode
-	settingsEasingBtn.Text = easingMode
+	UI.easingBtn.Text = "Ease: " .. easingMode
+	UI.settingsEasingBtn.Text = easingMode
 end)
 
-durationBox.FocusLost:Connect(function(enterPressed)
-	local n = tonumber(durationBox.Text)
+UI.durationBox.FocusLost:Connect(function(enterPressed)
+	local n = tonumber(UI.durationBox.Text)
 	if n and n > 0 then
 		duration = n
 		currentTime = clamp(currentTime, 0, duration)
@@ -1795,78 +1850,78 @@ durationBox.FocusLost:Connect(function(enterPressed)
 		updatePlayheadVisual()
 		updateTimeDisplays()
 	end
-	durationBox.Text = tostring(duration)
+	UI.durationBox.Text = tostring(duration)
 end)
 
-speedBox.FocusLost:Connect(function()
-	local n = tonumber(speedBox.Text)
+UI.speedBox.FocusLost:Connect(function()
+	local n = tonumber(UI.speedBox.Text)
 	if n and n > 0 then
 		playbackSpeed = n
-		settingsSpeedBox.Text = tostring(playbackSpeed)
+		UI.settingsSpeedBox.Text = tostring(playbackSpeed)
 	end
-	speedBox.Text = tostring(playbackSpeed)
+	UI.speedBox.Text = tostring(playbackSpeed)
 end)
 
 -- Settings panel
-settingsCloseBtn.Activated:Connect(function()
-	settingsBackdrop.Visible = false
+UI.settingsCloseBtn.Activated:Connect(function()
+	UI.settingsBackdrop.Visible = false
 end)
 
-settingsEasingBtn.Activated:Connect(function()
+UI.settingsEasingBtn.Activated:Connect(function()
 	easingModeIndex = (easingModeIndex % #EASING_MODES) + 1
 	easingMode = EASING_MODES[easingModeIndex]
-	easingBtn.Text = "Ease: " .. easingMode
-	settingsEasingBtn.Text = easingMode
+	UI.easingBtn.Text = "Ease: " .. easingMode
+	UI.settingsEasingBtn.Text = easingMode
 end)
 
-settingsLoopBtn.Activated:Connect(function()
+UI.settingsLoopBtn.Activated:Connect(function()
 	loopPlayback = not loopPlayback
-	loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
-	settingsLoopBtn.Text = loopPlayback and "On" or "Off"
+	UI.loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
+	UI.settingsLoopBtn.Text = loopPlayback and "On" or "Off"
 end)
 
-applySettingsBtn.Activated:Connect(function()
-	local s = tonumber(camSpeedBox.Text)
+UI.applySettingsBtn.Activated:Connect(function()
+	local s = tonumber(UI.camSpeedBox.Text)
 	if s and s > 0 then camMoveSpeed = s end
-	camSpeedBox.Text = tostring(camMoveSpeed)
+	UI.camSpeedBox.Text = tostring(camMoveSpeed)
 
-	local sens = tonumber(sensitivityBox.Text)
+	local sens = tonumber(UI.sensitivityBox.Text)
 	if sens and sens > 0 then camSensitivity = sens end
-	sensitivityBox.Text = tostring(camSensitivity)
+	UI.sensitivityBox.Text = tostring(camSensitivity)
 
-	local fov = tonumber(defaultFovBox.Text)
+	local fov = tonumber(UI.defaultFovBox.Text)
 	if fov and fov > 0 and fov < 170 then
 		defaultFOV = fov
 		if not isPlaying then
 			currentFOV = fov
 		end
 	end
-	defaultFovBox.Text = tostring(defaultFOV)
+	UI.defaultFovBox.Text = tostring(defaultFOV)
 
-	local spd = tonumber(settingsSpeedBox.Text)
+	local spd = tonumber(UI.settingsSpeedBox.Text)
 	if spd and spd > 0 then
 		playbackSpeed = spd
-		speedBox.Text = tostring(playbackSpeed)
+		UI.speedBox.Text = tostring(playbackSpeed)
 	end
-	settingsSpeedBox.Text = tostring(playbackSpeed)
+	UI.settingsSpeedBox.Text = tostring(playbackSpeed)
 end)
 
-exportBtn.Activated:Connect(exportKeyframes)
-importBtn.Activated:Connect(importKeyframes)
+UI.exportBtn.Activated:Connect(exportKeyframes)
+UI.importBtn.Activated:Connect(importKeyframes)
 
 -- Left panel: Apply manual field edits to the selected keyframe
-applyFieldsBtn.Activated:Connect(function()
+UI.applyFieldsBtn.Activated:Connect(function()
 	if not selectedKeyframe then return end
 	local kf = selectedKeyframe
 
-	local px = tonumber(posXBox.Text) or kf.cframe.Position.X
-	local py = tonumber(posYBox.Text) or kf.cframe.Position.Y
-	local pz = tonumber(posZBox.Text) or kf.cframe.Position.Z
-	local rx = tonumber(rotXBox.Text) or 0
-	local ry = tonumber(rotYBox.Text) or 0
-	local rz = tonumber(rotZBox.Text) or 0
-	local fov = tonumber(fovBox.Text) or kf.fov
-	local newTime = tonumber(timeBox.Text) or kf.time
+	local px = tonumber(UI.posXBox.Text) or kf.cframe.Position.X
+	local py = tonumber(UI.posYBox.Text) or kf.cframe.Position.Y
+	local pz = tonumber(UI.posZBox.Text) or kf.cframe.Position.Z
+	local rx = tonumber(UI.rotXBox.Text) or 0
+	local ry = tonumber(UI.rotYBox.Text) or 0
+	local rz = tonumber(UI.rotZBox.Text) or 0
+	local fov = tonumber(UI.fovBox.Text) or kf.fov
+	local newTime = tonumber(UI.timeBox.Text) or kf.time
 
 	kf.cframe = CFrame.new(px, py, pz) * CFrame.fromOrientation(math.rad(rx), math.rad(ry), math.rad(rz))
 	kf.fov = clamp(fov, 1, 169)
@@ -1881,7 +1936,7 @@ applyFieldsBtn.Activated:Connect(function()
 	seekTo(currentTime) -- refresh preview if the edited keyframe affects current pose
 end)
 
-snapToCameraBtn.Activated:Connect(function()
+UI.snapToCameraBtn.Activated:Connect(function()
 	if not selectedKeyframe then return end
 	selectedKeyframe.cframe = freeCamCFrame
 	selectedKeyframe.fov = currentFOV
@@ -1889,9 +1944,9 @@ snapToCameraBtn.Activated:Connect(function()
 	refreshTimelineMarkers()
 end)
 
-duplicateBtn.Activated:Connect(duplicateKeyframe)
-deleteBtn.Activated:Connect(deleteSelectedKeyframe)
-clearAllBtn.Activated:Connect(clearAllKeyframes)
+UI.duplicateBtn.Activated:Connect(duplicateKeyframe)
+UI.deleteBtn.Activated:Connect(deleteSelectedKeyframe)
+UI.clearAllBtn.Activated:Connect(clearAllKeyframes)
 
 ----------------------------------------------------------------------
 -- KEYBOARD / MOUSE INPUT (desktop)
@@ -1981,7 +2036,7 @@ UserInputService.InputChanged:Connect(function(input)
 		freeCamCFrame = CFrame.new(pos) * CFrame.fromOrientation(pitch, yaw, 0)
 	elseif input.UserInputType == Enum.UserInputType.MouseWheel then
 		camMoveSpeed = clamp(camMoveSpeed + input.Position.Z * 5, 5, 400)
-		camSpeedBox.Text = tostring(camMoveSpeed)
+		UI.camSpeedBox.Text = tostring(camMoveSpeed)
 	elseif input.UserInputType == Enum.UserInputType.Touch and touchLookActive and input == touchLookId then
 		if lastTouchPos then
 			local delta = input.Position - lastTouchPos
