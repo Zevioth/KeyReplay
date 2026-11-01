@@ -1,19 +1,28 @@
 --[[
 	CAMERA KEYFRAME EDITOR
 	-----------------------------------------------------------------
-	Single-LocalScript cinematic camera keyframe editor.
+	A single-LocalScript cinematic camera keyframe editor.
+
 	PLACEMENT: StarterPlayer > StarterPlayerScripts
 
-	Desktop (editor open, not playing):
-		W/A/S/D move, E/Q up/down, Right Mouse hold+drag to look,
-		Shift = speed boost, Mouse Wheel = adjust move speed,
-		Space = play/pause, Delete = remove selected keyframe,
-		Ctrl+D = duplicate selected keyframe, Esc = stop playback.
+	Everything (GUI, input handling, keyframe system, timeline,
+	playback engine and JSON import/export) lives inside this one
+	LocalScript. No ModuleScripts, server scripts, RemoteEvents or
+	third-party libraries are required.
 
-	Mobile (shown automatically on touch devices):
-		Left thumbstick = move, Up/Down buttons = move up/down,
-		Drag empty viewport = look around,
-		Two-finger tap = stop UI-free playback and restore GUIs.
+	Desktop controls while the editor is open and not playing back:
+		W / A / S / D   - move forward / left / back / right
+		E / Q           - move up / down
+		Right Mouse     - hold + drag to look around
+		Shift           - speed boost
+		Mouse Wheel     - adjust movement speed
+
+	Mobile controls (shown automatically on touch devices):
+		Left thumbstick       - move
+		Up / Down buttons     - move up / down
+		Drag anywhere on the viewport (outside the panels) - look around
+		Joystick and camera look support separate fingers at the same time.
+		Two-finger tap stops UI-free playback and restores all hidden GUIs.
 -----------------------------------------------------------------]]
 
 ----------------------------------------------------------------------
@@ -31,155 +40,141 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local isTouchDevice = UserInputService.TouchEnabled
 
--- Saves and temporarily hides every PlayerGui LayerCollector plus Roblox CoreGui
--- (including the two core topbar icons). Restored when playback ends or stops.
+-- Saves and temporarily hides every PlayerGui LayerCollector plus Roblox CoreGui.
+-- The exact previous states are restored when playback ends or is stopped.
 local savedPlayerGuiStates = nil
 local savedCoreGuiStates = {}
 local savedTopbarEnabled = true
 local savedDevConsoleVisible = false
 local hasSavedDevConsoleState = false
 local playbackGuiAddedConnection = nil
-local coreGuiReassertConnection = nil
 
 local function hideAllPlaybackGuis()
-	if savedPlayerGuiStates then return end
+    if savedPlayerGuiStates then return end
 
-	savedPlayerGuiStates = {}
-	savedCoreGuiStates = {}
+    savedPlayerGuiStates = {}
+    savedCoreGuiStates = {}
 
-	local function hideLayerCollector(instance)
-		if instance:IsA("LayerCollector") then
-			savedPlayerGuiStates[instance] = instance.Enabled
-			instance.Enabled = false
-		end
-	end
+    local function hideLayerCollector(instance)
+        if instance:IsA("LayerCollector") then
+            savedPlayerGuiStates[instance] = instance.Enabled
+            instance.Enabled = false
+        end
+    end
 
-	for _, instance in ipairs(playerGui:GetDescendants()) do
-		hideLayerCollector(instance)
-	end
+    for _, instance in ipairs(playerGui:GetDescendants()) do
+        hideLayerCollector(instance)
+    end
 
-	-- Also hide ScreenGuis/BillboardGuis/SurfaceGuis created while playback is active.
-	playbackGuiAddedConnection = playerGui.DescendantAdded:Connect(function(instance)
-		if savedPlayerGuiStates and instance:IsA("LayerCollector") then
-			if savedPlayerGuiStates[instance] == nil then
-				savedPlayerGuiStates[instance] = instance.Enabled
-				instance.Enabled = false
-			end
-		end
-	end)
+    -- Also hide ScreenGuis/BillboardGuis/SurfaceGuis created while playback is active.
+    playbackGuiAddedConnection = playerGui.DescendantAdded:Connect(function(instance)
+        if savedPlayerGuiStates and instance:IsA("LayerCollector") then
+            if savedPlayerGuiStates[instance] == nil then
+                savedPlayerGuiStates[instance] = instance.Enabled
+                instance.Enabled = false
+            end
+        end
+    end)
 
-	local topbarOk, topbarValue = pcall(function()
-		return StarterGui:GetCore("TopbarEnabled")
-	end)
-	savedTopbarEnabled = (topbarOk and type(topbarValue) == "boolean") and topbarValue or true
+    local topbarOk, topbarValue = pcall(function()
+        return StarterGui:GetCore("TopbarEnabled")
+    end)
+    if topbarOk and type(topbarValue) == "boolean" then
+        savedTopbarEnabled = topbarValue
+    else
+        savedTopbarEnabled = true
+    end
 
-	local devConsoleOk, devConsoleValue = pcall(function()
-		return StarterGui:GetCore("DevConsoleVisible")
-	end)
-	hasSavedDevConsoleState = devConsoleOk and type(devConsoleValue) == "boolean"
-	if hasSavedDevConsoleState then
-		savedDevConsoleVisible = devConsoleValue
-		pcall(function() StarterGui:SetCore("DevConsoleVisible", false) end)
-	end
+    local devConsoleOk, devConsoleValue = pcall(function()
+        return StarterGui:GetCore("DevConsoleVisible")
+    end)
+    hasSavedDevConsoleState = devConsoleOk and type(devConsoleValue) == "boolean"
+    if hasSavedDevConsoleState then
+        savedDevConsoleVisible = devConsoleValue
+        pcall(function()
+            StarterGui:SetCore("DevConsoleVisible", false)
+        end)
+    end
 
-	-- Preserve each CoreGui element's own state before hiding Roblox's topbar/menu icons.
-	for _, coreGuiType in ipairs(Enum.CoreGuiType:GetEnumItems()) do
-		if coreGuiType.Name ~= "All" then
-			local ok, enabled = pcall(function()
-				return StarterGui:GetCoreGuiEnabled(coreGuiType)
-			end)
-			if ok then
-				savedCoreGuiStates[coreGuiType] = enabled
-			end
-			pcall(function() StarterGui:SetCoreGuiEnabled(coreGuiType, false) end)
-		end
-	end
+    -- Preserve each CoreGui element's own state before hiding Roblox's topbar.
+    for _, coreGuiType in ipairs(Enum.CoreGuiType:GetEnumItems()) do
+        if coreGuiType.Name ~= "All" then
+            local ok, enabled = pcall(function()
+                return StarterGui:GetCoreGuiEnabled(coreGuiType)
+            end)
+            if ok then
+                savedCoreGuiStates[coreGuiType] = enabled
+            end
+            pcall(function()
+                StarterGui:SetCoreGuiEnabled(coreGuiType, false)
+            end)
+        end
+    end
 
-	-- TopbarEnabled=false hides Roblox's native topbar icons (the Roblox menu
-	-- button and the hamburger/menu icon) along with chat, backpack, player list.
-	pcall(function() StarterGui:SetCore("TopbarEnabled", false) end)
-
-	-- Some Roblox client versions can briefly re-show the native topbar icons
-	-- after other systems touch CoreGui. Re-assert every half second while
-	-- playback GUIs are hidden so the two core buttons stay reliably hidden.
-	if coreGuiReassertConnection then
-		coreGuiReassertConnection:Disconnect()
-		coreGuiReassertConnection = nil
-	end
-	local reassertAccum = 0
-	coreGuiReassertConnection = RunService.Heartbeat:Connect(function(dt)
-		reassertAccum = reassertAccum + dt
-		if reassertAccum < 0.5 then return end
-		reassertAccum = 0
-		pcall(function() StarterGui:SetCore("TopbarEnabled", false) end)
-	end)
+    -- TopbarEnabled also hides Roblox's built-in CoreGui (chat, backpack, player list, etc.).
+    pcall(function()
+        StarterGui:SetCore("TopbarEnabled", false)
+    end)
 end
 
 local function restoreAllPlaybackGuis()
-	if not savedPlayerGuiStates then return end
+    if not savedPlayerGuiStates then return end
 
-	if playbackGuiAddedConnection then
-		playbackGuiAddedConnection:Disconnect()
-		playbackGuiAddedConnection = nil
-	end
-	if coreGuiReassertConnection then
-		coreGuiReassertConnection:Disconnect()
-		coreGuiReassertConnection = nil
-	end
+    if playbackGuiAddedConnection then
+        playbackGuiAddedConnection:Disconnect()
+        playbackGuiAddedConnection = nil
+    end
 
-	for instance, wasEnabled in pairs(savedPlayerGuiStates) do
-		if instance and instance.Parent then
-			pcall(function() instance.Enabled = wasEnabled end)
-		end
-	end
+    if savedPlayerGuiStates then
+        for instance, wasEnabled in pairs(savedPlayerGuiStates) do
+            if instance and instance.Parent then
+                pcall(function()
+                    instance.Enabled = wasEnabled
+                end)
+            end
+        end
+    end
 
-	for coreGuiType, wasEnabled in pairs(savedCoreGuiStates) do
-		pcall(function() StarterGui:SetCoreGuiEnabled(coreGuiType, wasEnabled) end)
-	end
+    for coreGuiType, wasEnabled in pairs(savedCoreGuiStates) do
+        pcall(function()
+            StarterGui:SetCoreGuiEnabled(coreGuiType, wasEnabled)
+        end)
+    end
 
-	pcall(function() StarterGui:SetCore("TopbarEnabled", savedTopbarEnabled) end)
-	if hasSavedDevConsoleState then
-		pcall(function() StarterGui:SetCore("DevConsoleVisible", savedDevConsoleVisible) end)
-	end
+    pcall(function()
+        StarterGui:SetCore("TopbarEnabled", savedTopbarEnabled)
+    end)
+    if hasSavedDevConsoleState then
+        pcall(function()
+            StarterGui:SetCore("DevConsoleVisible", savedDevConsoleVisible)
+        end)
+    end
 
-	savedPlayerGuiStates = nil
-	savedCoreGuiStates = {}
-	hasSavedDevConsoleState = false
+    savedPlayerGuiStates = nil
+    savedCoreGuiStates = {}
+    hasSavedDevConsoleState = false
 end
 
 ----------------------------------------------------------------------
--- COLOR / STYLE PALETTE  (minimal, flat, CapCut-style with soft semantic accents)
+-- COLOR / STYLE PALETTE
 ----------------------------------------------------------------------
 local COLORS = {
-	background = Color3.fromRGB(17, 17, 19),
-	panel = Color3.fromRGB(23, 23, 26),
-	panelAlt = Color3.fromRGB(29, 29, 33),
-	toolbar = Color3.fromRGB(20, 20, 23),
-	border = Color3.fromRGB(42, 42, 48),
-	divider = Color3.fromRGB(34, 34, 39),
-
-	accent = Color3.fromRGB(92, 132, 250),       -- primary / neutral actions
-	accentDim = Color3.fromRGB(52, 70, 120),
-
-	success = Color3.fromRGB(96, 200, 150),      -- confirm / play / apply
-	successDim = Color3.fromRGB(32, 58, 48),
-
-	danger = Color3.fromRGB(232, 98, 98),        -- close / stop / delete
-	dangerDim = Color3.fromRGB(62, 36, 38),
-
-	warning = Color3.fromRGB(232, 178, 92),      -- pause / countdown / caution
-	warningDim = Color3.fromRGB(58, 46, 26),
-
-	text = Color3.fromRGB(236, 236, 241),
-	muted = Color3.fromRGB(140, 140, 150),
-
-	inputBg = Color3.fromRGB(15, 15, 18),
-	buttonBg = Color3.fromRGB(36, 36, 41),
-	markerColor = Color3.fromRGB(92, 132, 250),
-	markerSelected = Color3.fromRGB(232, 178, 92),
-	playhead = Color3.fromRGB(232, 98, 98),
-	graphLine = Color3.fromRGB(96, 200, 150),
-	graphAxis = Color3.fromRGB(50, 50, 56),
+	background = Color3.fromRGB(26, 26, 30),
+	panel = Color3.fromRGB(34, 34, 39),
+	panelAlt = Color3.fromRGB(40, 40, 46),
+	toolbar = Color3.fromRGB(30, 30, 35),
+	border = Color3.fromRGB(58, 58, 66),
+	accent = Color3.fromRGB(78, 140, 235),
+	accentDim = Color3.fromRGB(55, 98, 165),
+	text = Color3.fromRGB(232, 232, 238),
+	muted = Color3.fromRGB(150, 150, 160),
+	danger = Color3.fromRGB(220, 90, 90),
+	success = Color3.fromRGB(95, 200, 140),
+	inputBg = Color3.fromRGB(24, 24, 28),
+	buttonBg = Color3.fromRGB(50, 50, 58),
+	markerColor = Color3.fromRGB(78, 140, 235),
+	markerSelected = Color3.fromRGB(240, 190, 90),
+	playhead = Color3.fromRGB(240, 90, 90),
 }
 
 ----------------------------------------------------------------------
@@ -187,7 +182,7 @@ local COLORS = {
 ----------------------------------------------------------------------
 local function addCorner(parent, radius)
 	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, radius or 8)
+	c.CornerRadius = UDim.new(0, radius or 6)
 	c.Parent = parent
 	return c
 end
@@ -251,11 +246,11 @@ local function makeButton(parent, text, size, position, accentColor)
 	btn.Text = text
 	btn.AutoButtonColor = true
 	btn.Parent = parent
-	addCorner(btn, 7)
+	addCorner(btn, 6)
 	return btn
 end
 
-local function makeTextBox(parent, placeholder, size, position)
+local function makeTextBox(parent, placeholder, size, position, numeric)
 	local tb = Instance.new("TextBox")
 	tb.Size = size
 	tb.Position = position or UDim2.new(0, 0, 0, 0)
@@ -268,8 +263,11 @@ local function makeTextBox(parent, placeholder, size, position)
 	tb.Text = ""
 	tb.ClearTextOnFocus = false
 	tb.Parent = parent
-	addCorner(tb, 5)
+	addCorner(tb, 4)
 	addStroke(tb, COLORS.border, 1)
+	if numeric then
+		-- Nothing special required functionally; kept as a flag for future use.
+	end
 	return tb
 end
 
@@ -317,9 +315,9 @@ local duration = 10
 local playbackSpeed = 1
 local loopPlayback = false
 
-local countdownSeconds = 3
-local countdownActive = false
-local cancelCountdown = nil -- assigned once the UI exists
+local EASING_MODES = { "Linear", "Smooth", "EaseIn", "EaseOut", "EaseInOut" }
+local easingModeIndex = 1
+local easingMode = EASING_MODES[easingModeIndex]
 
 -- Free-camera settings (adjustable from the Settings panel)
 local camMoveSpeed = 40
@@ -331,7 +329,6 @@ local currentFOV = defaultFOV
 local freeCamCFrame = camera and camera.CFrame or CFrame.new()
 local moveState = { forward = false, backward = false, left = false, right = false, up = false, down = false }
 local shiftHeld = false
-local ctrlHeld = false
 local rightMouseDown = false
 
 -- Touch look / joystick runtime state
@@ -345,131 +342,28 @@ local joystickDir = Vector3.new(0, 0, 0) -- x = strafe, z = forward (y unused he
 local keyframeIdCounter = 0
 
 ----------------------------------------------------------------------
--- EASING FUNCTIONS  (expanded curve library, Robert Penner-style)
+-- EASING FUNCTIONS
 ----------------------------------------------------------------------
-local function bounceOutRaw(t)
-	local n1, d1 = 7.5625, 2.75
-	if t < 1 / d1 then
-		return n1 * t * t
-	elseif t < 2 / d1 then
-		t = t - 1.5 / d1
-		return n1 * t * t + 0.75
-	elseif t < 2.5 / d1 then
-		t = t - 2.25 / d1
-		return n1 * t * t + 0.9375
-	else
-		t = t - 2.625 / d1
-		return n1 * t * t + 0.984375
-	end
-end
-
 local function easeValue(t, mode)
 	t = clamp(t, 0, 1)
-	local pi = math.pi
 	if mode == "Linear" then
 		return t
 	elseif mode == "Smooth" then
 		return t * t * (3 - 2 * t)
-	elseif mode == "SineIn" then
-		return 1 - math.cos((t * pi) / 2)
-	elseif mode == "SineOut" then
-		return math.sin((t * pi) / 2)
-	elseif mode == "SineInOut" then
-		return -(math.cos(pi * t) - 1) / 2
-	elseif mode == "QuadIn" or mode == "EaseIn" then
+	elseif mode == "EaseIn" then
 		return t * t
-	elseif mode == "QuadOut" or mode == "EaseOut" then
+	elseif mode == "EaseOut" then
 		return 1 - (1 - t) * (1 - t)
-	elseif mode == "QuadInOut" or mode == "EaseInOut" then
-		if t < 0.5 then return 2 * t * t end
-		local f = -2 * t + 2
-		return 1 - (f * f) / 2
-	elseif mode == "CubicIn" then
-		return t * t * t
-	elseif mode == "CubicOut" then
-		local f = 1 - t
-		return 1 - f * f * f
-	elseif mode == "CubicInOut" then
-		if t < 0.5 then return 4 * t * t * t end
-		local f = -2 * t + 2
-		return 1 - (f * f * f) / 2
-	elseif mode == "QuartIn" then
-		return t * t * t * t
-	elseif mode == "QuartOut" then
-		local f = 1 - t
-		return 1 - f * f * f * f
-	elseif mode == "QuartInOut" then
-		if t < 0.5 then return 8 * t * t * t * t end
-		local f = -2 * t + 2
-		return 1 - (f * f * f * f) / 2
-	elseif mode == "ExpoIn" then
-		return (t <= 0) and 0 or (2 ^ (10 * t - 10))
-	elseif mode == "ExpoOut" then
-		return (t >= 1) and 1 or (1 - 2 ^ (-10 * t))
-	elseif mode == "ExpoInOut" then
-		if t <= 0 then return 0 end
-		if t >= 1 then return 1 end
-		if t < 0.5 then return (2 ^ (20 * t - 10)) / 2 end
-		return (2 - 2 ^ (-20 * t + 10)) / 2
-	elseif mode == "CircIn" then
-		return 1 - math.sqrt(1 - t * t)
-	elseif mode == "CircOut" then
-		return math.sqrt(1 - (t - 1) * (t - 1))
-	elseif mode == "CircInOut" then
-		if t < 0.5 then return (1 - math.sqrt(1 - (2 * t) * (2 * t))) / 2 end
-		local f = -2 * t + 2
-		return (math.sqrt(1 - f * f) + 1) / 2
-	elseif mode == "BackIn" then
-		local c1 = 1.70158
-		local c3 = c1 + 1
-		return c3 * t * t * t - c1 * t * t
-	elseif mode == "BackOut" then
-		local c1 = 1.70158
-		local c3 = c1 + 1
-		local f = t - 1
-		return 1 + c3 * f * f * f + c1 * f * f
-	elseif mode == "BackInOut" then
-		local c1 = 1.70158
-		local c2 = c1 * 1.525
+	elseif mode == "EaseInOut" then
 		if t < 0.5 then
-			return ((2 * t) * (2 * t) * ((c2 + 1) * 2 * t - c2)) / 2
+			return 2 * t * t
+		else
+			local f = -2 * t + 2
+			return 1 - (f * f) / 2
 		end
-		local f = 2 * t - 2
-		return (f * f * ((c2 + 1) * f + c2) + 2) / 2
-	elseif mode == "ElasticIn" then
-		if t <= 0 then return 0 end
-		if t >= 1 then return 1 end
-		local c4 = (2 * pi) / 3
-		return -(2 ^ (10 * t - 10)) * math.sin((t * 10 - 10.75) * c4)
-	elseif mode == "ElasticOut" then
-		if t <= 0 then return 0 end
-		if t >= 1 then return 1 end
-		local c4 = (2 * pi) / 3
-		return 2 ^ (-10 * t) * math.sin((t * 10 - 0.75) * c4) + 1
-	elseif mode == "BounceIn" then
-		return 1 - bounceOutRaw(1 - t)
-	elseif mode == "BounceOut" then
-		return bounceOutRaw(t)
 	end
 	return t
 end
-
--- Modes offered in the UI cycle button and the easing picker list.
--- ("EaseIn"/"EaseOut"/"EaseInOut" remain resolvable above for older exported JSON.)
-local EASING_MODES = {
-	"Linear", "Smooth",
-	"SineIn", "SineOut", "SineInOut",
-	"QuadIn", "QuadOut", "QuadInOut",
-	"CubicIn", "CubicOut", "CubicInOut",
-	"QuartIn", "QuartOut", "QuartInOut",
-	"ExpoIn", "ExpoOut", "ExpoInOut",
-	"CircIn", "CircOut", "CircInOut",
-	"BackIn", "BackOut", "BackInOut",
-	"ElasticIn", "ElasticOut",
-	"BounceIn", "BounceOut",
-}
-local easingModeIndex = 1
-local easingMode = EASING_MODES[easingModeIndex]
 
 ----------------------------------------------------------------------
 -- KEYFRAME SYSTEM
@@ -492,18 +386,6 @@ local function findKeyframeNear(t, ignore)
 	return nil
 end
 
--- Closest keyframe to a timestamp, used when a Remove action is pressed with nothing selected.
-local function nearestKeyframeToTime(t)
-	local best, bestDist = nil, math.huge
-	for _, kf in ipairs(keyframes) do
-		local d = math.abs(kf.time - t)
-		if d < bestDist then
-			best, bestDist = kf, d
-		end
-	end
-	return best
-end
-
 -- Forward declarations for UI refresh functions (defined later, used by keyframe functions).
 local refreshKeyframeList
 local refreshTimelineMarkers
@@ -513,7 +395,6 @@ local updateTimeDisplays
 local seekTo
 local refreshRuler
 local resetJoystick
-local refreshCurveGraph
 
 local function selectKeyframe(kf)
 	selectedKeyframe = kf
@@ -543,35 +424,18 @@ local function addKeyframe(t, cf, fov)
 	refreshTimelineMarkers()
 end
 
-local function removeKeyframe(kf)
-	if not kf then return end
-	for i, existing in ipairs(keyframes) do
-		if existing == kf then
+local function deleteSelectedKeyframe()
+	if not selectedKeyframe then return end
+	for i, kf in ipairs(keyframes) do
+		if kf == selectedKeyframe then
 			table.remove(keyframes, i)
 			break
 		end
 	end
-	if selectedKeyframe == kf then
-		selectedKeyframe = nil
-	end
+	selectedKeyframe = nil
 	refreshKeyframeList()
 	refreshTimelineMarkers()
 	refreshSelectedPanel()
-end
-
-local function deleteSelectedKeyframe()
-	if not selectedKeyframe then return end
-	removeKeyframe(selectedKeyframe)
-end
-
--- Used by the toolbar's quick Remove button: deletes the selection, or
--- falls back to the keyframe nearest the playhead if nothing is selected.
-local function quickRemoveKeyframe()
-	if selectedKeyframe then
-		removeKeyframe(selectedKeyframe)
-	else
-		removeKeyframe(nearestKeyframeToTime(currentTime))
-	end
 end
 
 local function duplicateKeyframe()
@@ -725,23 +589,21 @@ tbLayout.Parent = toolbarButtons
 local function toolbarBtn(text, width, color)
 	local mobileWidths = {
 		Play = 42, Pause = 42, Stop = 42,
-		["+ Key"] = 44, ["- Key"] = 44, Settings = 52, ["?"] = 25, ["_"] = 25, X = 25,
+		["+ Keyframe"] = 62, Settings = 52, ["_"] = 25, X = 25,
 	}
 	local buttonWidth = isTouchDevice and (mobileWidths[text] or math.floor((width or 70) * 0.7)) or (width or 70)
 	local buttonHeight = isTouchDevice and 27 or 32
 	local b = makeButton(toolbarButtons, text, UDim2.new(0, buttonWidth, 0, buttonHeight), nil, color)
 	b.ZIndex = 5
-	b.LayoutOrder = #toolbarButtons:GetChildren()
+	b.LayoutOrder = toolbarButtons:GetChildren() and #toolbarButtons:GetChildren() or 0
 	return b
 end
 
-local playBtn = toolbarBtn("Play", 64, COLORS.success)
-local pauseBtn = toolbarBtn("Pause", 64, COLORS.warning)
-local stopBtn = toolbarBtn("Stop", 64, COLORS.danger)
-local addKeyBtn = toolbarBtn(isTouchDevice and "+ Key" or "+ Keyframe", 96, COLORS.accent)
-local removeKeyBtn = toolbarBtn(isTouchDevice and "- Key" or "- Keyframe", 96, COLORS.dangerDim)
+local playBtn = toolbarBtn("Play", 64, COLORS.accent)
+local pauseBtn = toolbarBtn("Pause", 64)
+local stopBtn = toolbarBtn("Stop", 64)
+local addKeyBtn = toolbarBtn("+ Keyframe", 96)
 local settingsBtn = toolbarBtn("Settings", 80)
-local helpBtn = toolbarBtn("?", 30)
 local minimizeBtn = toolbarBtn("_", 36)
 local closeBtn = toolbarBtn("X", 36, COLORS.danger)
 
@@ -749,11 +611,10 @@ local closeBtn = toolbarBtn("X", 36, COLORS.danger)
 -- LEFT PANEL (keyframe list + selected keyframe editor)
 ----------------------------------------------------------------------
 local leftPanelWidth = isTouchDevice and 176 or 260
-local timelineHeight = isTouchDevice and 108 or 150
 
 local leftPanel = makeFrame(
 	rootFrame,
-	UDim2.new(0, leftPanelWidth, 1, -toolbarHeight - timelineHeight),
+	UDim2.new(0, leftPanelWidth, 1, -toolbarHeight - (isTouchDevice and 108 or 150)),
 	UDim2.new(0, 0, 0, toolbarHeight),
 	COLORS.panel
 )
@@ -783,7 +644,7 @@ keyframeListFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
 keyframeListFrame.LayoutOrder = 2
 keyframeListFrame.ZIndex = 4
 keyframeListFrame.Parent = leftPanel
-addCorner(keyframeListFrame, 7)
+addCorner(keyframeListFrame, 6)
 
 local keyframeListLayout = Instance.new("UIListLayout")
 keyframeListLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -853,7 +714,7 @@ local function labeledField(parent, labelText, order)
 	lbl.TextColor3 = COLORS.muted
 	lbl.ZIndex = 4
 
-	local tb = makeTextBox(row, "0", UDim2.new(1, -(labelWidth + 4), 1, 0), UDim2.new(0, labelWidth + 4, 0, 0))
+	local tb = makeTextBox(row, "0", UDim2.new(1, -(labelWidth + 4), 1, 0), UDim2.new(0, labelWidth + 4, 0, 0), true)
 	tb.ZIndex = 4
 	return tb
 end
@@ -886,16 +747,16 @@ sbLayout.FillDirection = Enum.FillDirection.Horizontal
 sbLayout.Padding = UDim.new(0, isTouchDevice and 3 or 4)
 sbLayout.Parent = selectedButtonsRow
 
-local applyFieldsBtn = makeButton(selectedButtonsRow, "Apply", UDim2.new(0, isTouchDevice and 48 or 74, 1, 0), nil, COLORS.success)
+local applyFieldsBtn = makeButton(selectedButtonsRow, "Apply", UDim2.new(0, isTouchDevice and 48 or 74, 1, 0), nil, COLORS.accent)
 applyFieldsBtn.ZIndex = 4
-local snapToCameraBtn = makeButton(selectedButtonsRow, isTouchDevice and "Snap Cam" or "Snap to Cam", UDim2.new(0, isTouchDevice and 66 or 96, 1, 0), COLORS.accent)
+local snapToCameraBtn = makeButton(selectedButtonsRow, isTouchDevice and "Snap Cam" or "Snap to Cam", UDim2.new(0, isTouchDevice and 66 or 96, 1, 0))
 snapToCameraBtn.ZIndex = 4
 local duplicateBtn = makeButton(selectedButtonsRow, "Duplicate", UDim2.new(0, isTouchDevice and 58 or 86, 1, 0))
 duplicateBtn.ZIndex = 4
 local deleteBtn = makeButton(selectedButtonsRow, "Delete", UDim2.new(0, isTouchDevice and 46 or 70, 1, 0), nil, COLORS.danger)
 deleteBtn.ZIndex = 4
 
-local clearAllBtn = makeButton(selectedInfoFrame, "Clear All Keyframes", UDim2.new(1, 0, 0, isTouchDevice and 22 or 26), nil, COLORS.dangerDim)
+local clearAllBtn = makeButton(selectedInfoFrame, "Clear All Keyframes", UDim2.new(1, 0, 0, isTouchDevice and 22 or 26), nil, COLORS.danger)
 clearAllBtn.LayoutOrder = 10
 clearAllBtn.ZIndex = 4
 
@@ -922,6 +783,7 @@ end
 ----------------------------------------------------------------------
 -- BOTTOM TIMELINE
 ----------------------------------------------------------------------
+local timelineHeight = isTouchDevice and 108 or 150
 local timeline = makeFrame(rootFrame, UDim2.new(1, 0, 0, timelineHeight), UDim2.new(0, 0, 1, -timelineHeight), COLORS.toolbar)
 timeline.ZIndex = 4
 timeline.Active = true
@@ -959,21 +821,21 @@ nextKeyBtn.ZIndex = 4
 local durationLabel = makeLabel(timelineControls, isTouchDevice and "Dur." or "Duration", UDim2.new(0, isTouchDevice and 32 or 56, 1, 0), nil, 12)
 durationLabel.TextColor3 = COLORS.muted
 durationLabel.ZIndex = 4
-local durationBox = makeTextBox(timelineControls, "10", UDim2.new(0, isTouchDevice and 36 or 50, 1, 0))
+local durationBox = makeTextBox(timelineControls, "10", UDim2.new(0, isTouchDevice and 36 or 50, 1, 0), nil, true)
 durationBox.Text = tostring(duration)
 durationBox.ZIndex = 4
 
 local speedLabel = makeLabel(timelineControls, isTouchDevice and "Spd." or "Speed", UDim2.new(0, isTouchDevice and 30 or 44, 1, 0), nil, 12)
 speedLabel.TextColor3 = COLORS.muted
 speedLabel.ZIndex = 4
-local speedBox = makeTextBox(timelineControls, "1", UDim2.new(0, isTouchDevice and 34 or 46, 1, 0))
+local speedBox = makeTextBox(timelineControls, "1", UDim2.new(0, isTouchDevice and 34 or 46, 1, 0), nil, true)
 speedBox.Text = tostring(playbackSpeed)
 speedBox.ZIndex = 4
 
 local loopBtn = makeButton(timelineControls, isTouchDevice and "Loop" or "Loop: Off", UDim2.new(0, isTouchDevice and 52 or 84, 1, 0))
 loopBtn.ZIndex = 4
 
-local easingBtn = makeButton(timelineControls, "Ease: " .. easingMode, UDim2.new(0, isTouchDevice and 100 or 136, 1, 0), nil, COLORS.accent)
+local easingBtn = makeButton(timelineControls, "Ease: " .. easingMode, UDim2.new(0, isTouchDevice and 88 or 120, 1, 0))
 easingBtn.ZIndex = 4
 
 local timeDisplay = makeLabel(timelineControls, "0.00 / 10.00s", UDim2.new(0, isTouchDevice and 88 or 110, 1, 0), nil, isTouchDevice and 10 or 13, Enum.TextXAlignment.Right)
@@ -988,7 +850,7 @@ trackContainer.BorderSizePixel = 0
 trackContainer.ZIndex = 4
 trackContainer.Active = true
 trackContainer.Parent = timeline
-addCorner(trackContainer, 7)
+addCorner(trackContainer, 6)
 addStroke(trackContainer, COLORS.border, 1)
 
 local rulerFrame = Instance.new("Frame")
@@ -1006,7 +868,7 @@ trackFrame.BorderSizePixel = 0
 trackFrame.ZIndex = 4
 trackFrame.Active = true
 trackFrame.Parent = trackContainer
-addCorner(trackFrame, 5)
+addCorner(trackFrame, 4)
 
 local playheadFrame = Instance.new("Frame")
 playheadFrame.Name = "Playhead"
@@ -1142,13 +1004,13 @@ settingsBackdrop.Parent = rootFrame
 
 local settingsPanel = makeFrame(
 	settingsBackdrop,
-	isTouchDevice and UDim2.new(0.92, 0, 0.84, 0) or UDim2.new(0, 380, 0, 560),
-	isTouchDevice and UDim2.new(0.04, 0, 0.08, 0) or UDim2.new(0.5, -190, 0.5, -280),
+	isTouchDevice and UDim2.new(0.9, 0, 0.78, 0) or UDim2.new(0, 360, 0, 460),
+	isTouchDevice and UDim2.new(0.05, 0, 0.11, 0) or UDim2.new(0.5, -180, 0.5, -230),
 	COLORS.panel
 )
 settingsPanel.ZIndex = 11
 settingsPanel.Active = true
-addCorner(settingsPanel, 12)
+addCorner(settingsPanel, 10)
 addStroke(settingsPanel, COLORS.border, 1)
 addPadding(settingsPanel, isTouchDevice and 9 or 14, isTouchDevice and 9 or 14, isTouchDevice and 9 or 14, isTouchDevice and 9 or 14)
 
@@ -1159,17 +1021,17 @@ settingsTitle.ZIndex = 11
 local settingsCloseBtn = makeButton(settingsPanel, "X", UDim2.new(0, 26, 0, 22), UDim2.new(1, -26, 0, 0), COLORS.danger)
 settingsCloseBtn.ZIndex = 11
 
--- Always scrollable: the panel now holds enough rows (curve preview, countdown,
--- data import/export) that a fixed, non-scrolling Frame could clip content.
-local settingsList = Instance.new("ScrollingFrame")
+local settingsList = isTouchDevice and Instance.new("ScrollingFrame") or Instance.new("Frame")
 settingsList.Size = UDim2.new(1, 0, 1, -34)
 settingsList.Position = UDim2.new(0, 0, 0, 34)
 settingsList.BackgroundTransparency = 1
 settingsList.BorderSizePixel = 0
-settingsList.ScrollingDirection = Enum.ScrollingDirection.Y
-settingsList.AutomaticCanvasSize = Enum.AutomaticSize.Y
-settingsList.CanvasSize = UDim2.new(0, 0, 0, 0)
-settingsList.ScrollBarThickness = isTouchDevice and 3 or 5
+if isTouchDevice then
+	settingsList.ScrollingDirection = Enum.ScrollingDirection.Y
+	settingsList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	settingsList.CanvasSize = UDim2.new(0, 0, 0, 0)
+	settingsList.ScrollBarThickness = 3
+end
 settingsList.ZIndex = 11
 settingsList.Parent = settingsPanel
 
@@ -1178,8 +1040,6 @@ settingsLayout.SortOrder = Enum.SortOrder.LayoutOrder
 settingsLayout.Padding = UDim.new(0, isTouchDevice and 5 or 8)
 settingsLayout.Parent = settingsList
 
-local settingsLabelWidth = isTouchDevice and 116 or 160
-
 local function settingsRow(labelText, order)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, 0, 0, isTouchDevice and 21 or 24)
@@ -1187,9 +1047,10 @@ local function settingsRow(labelText, order)
 	row.LayoutOrder = order
 	row.ZIndex = 11
 	row.Parent = settingsList
+	local settingsLabelWidth = isTouchDevice and 116 or 160
 	local lbl = makeLabel(row, labelText, UDim2.new(0, settingsLabelWidth, 1, 0), nil, isTouchDevice and 11 or 13)
 	lbl.ZIndex = 11
-	local tb = makeTextBox(row, "", UDim2.new(1, -(settingsLabelWidth + 4), 1, 0), UDim2.new(0, settingsLabelWidth + 4, 0, 0))
+	local tb = makeTextBox(row, "", UDim2.new(1, -(settingsLabelWidth + 4), 1, 0), UDim2.new(0, settingsLabelWidth + 4, 0, 0), true)
 	tb.ZIndex = 11
 	return tb
 end
@@ -1203,109 +1064,22 @@ defaultFovBox.Text = tostring(defaultFOV)
 local settingsSpeedBox = settingsRow("Playback Speed", 4)
 settingsSpeedBox.Text = tostring(playbackSpeed)
 
--- Interpolation (easing) picker
 local settingsEasingRow = Instance.new("Frame")
 settingsEasingRow.Size = UDim2.new(1, 0, 0, 24)
 settingsEasingRow.BackgroundTransparency = 1
 settingsEasingRow.LayoutOrder = 5
 settingsEasingRow.ZIndex = 11
 settingsEasingRow.Parent = settingsList
-local easingRowLabel = makeLabel(settingsEasingRow, "Motion Curve", UDim2.new(0, settingsLabelWidth, 1, 0), nil, isTouchDevice and 11 or 13)
+local settingsLabelWidth = isTouchDevice and 116 or 160
+local easingRowLabel = makeLabel(settingsEasingRow, "Interpolation", UDim2.new(0, settingsLabelWidth, 1, 0), nil, isTouchDevice and 11 or 13)
 easingRowLabel.ZIndex = 11
-local settingsEasingBtn = makeButton(settingsEasingRow, easingMode, UDim2.new(1, -(settingsLabelWidth + 4), 1, 0), UDim2.new(0, settingsLabelWidth + 4, 0, 0), COLORS.accent)
+local settingsEasingBtn = makeButton(settingsEasingRow, easingMode, UDim2.new(1, -(settingsLabelWidth + 4), 1, 0), UDim2.new(0, settingsLabelWidth + 4, 0, 0))
 settingsEasingBtn.ZIndex = 11
-
--- Curve preview (small graph showing the shape of the selected motion curve)
-local curveCanvas = Instance.new("Frame")
-curveCanvas.Size = UDim2.new(1, 0, 0, isTouchDevice and 56 or 70)
-curveCanvas.BackgroundColor3 = COLORS.inputBg
-curveCanvas.BorderSizePixel = 0
-curveCanvas.ClipsDescendants = true
-curveCanvas.LayoutOrder = 6
-curveCanvas.ZIndex = 11
-curveCanvas.Parent = settingsList
-addCorner(curveCanvas, 6)
-addStroke(curveCanvas, COLORS.border, 1)
-
-local curveBaseline = Instance.new("Frame")
-curveBaseline.Size = UDim2.new(1, 0, 0, 1)
-curveBaseline.Position = UDim2.new(0, 0, 1, -1)
-curveBaseline.BackgroundColor3 = COLORS.graphAxis
-curveBaseline.BorderSizePixel = 0
-curveBaseline.ZIndex = 11
-curveBaseline.Parent = curveCanvas
-
-local function drawCurveInto(canvas, modeName)
-	for _, child in ipairs(canvas:GetChildren()) do
-		if child:IsA("Frame") and child.Name == "CurveSeg" then
-			child:Destroy()
-		end
-	end
-	local w, h = canvas.AbsoluteSize.X, canvas.AbsoluteSize.Y
-	if w <= 1 or h <= 1 then w, h = 300, 70 end
-	local samples = 32
-	local prevPoint = nil
-	for i = 0, samples do
-		local t = i / samples
-		local v = easeValue(t, modeName)
-		local point = Vector2.new(t * w, h - (v * h))
-		if prevPoint then
-			local delta = point - prevPoint
-			local length = math.max(delta.Magnitude, 1)
-			local angle = math.deg(math.atan2(delta.Y, delta.X))
-			local seg = Instance.new("Frame")
-			seg.Name = "CurveSeg"
-			seg.AnchorPoint = Vector2.new(0, 0.5)
-			seg.Position = UDim2.new(0, prevPoint.X, 0, prevPoint.Y)
-			seg.Size = UDim2.new(0, length, 0, 2)
-			seg.Rotation = angle
-			seg.BackgroundColor3 = COLORS.graphLine
-			seg.BorderSizePixel = 0
-			seg.ZIndex = 12
-			seg.Parent = canvas
-		end
-		prevPoint = point
-	end
-end
-
-refreshCurveGraph = function()
-	drawCurveInto(curveCanvas, easingMode)
-end
-
-local curveDrawnOnce = false
-curveCanvas:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-	if not curveDrawnOnce then
-		curveDrawnOnce = true
-		refreshCurveGraph()
-	end
-end)
-
--- Full picker list (overlay, toggled by settingsEasingBtn)
-local easingDropdown = Instance.new("ScrollingFrame")
-easingDropdown.Size = isTouchDevice and UDim2.new(1, -18, 0, 190) or UDim2.new(1, -28, 0, 220)
-easingDropdown.Position = isTouchDevice and UDim2.new(0, 9, 0, 108) or UDim2.new(0, 14, 0, 118)
-easingDropdown.BackgroundColor3 = COLORS.panelAlt
-easingDropdown.BorderSizePixel = 0
-easingDropdown.ScrollBarThickness = 4
-easingDropdown.CanvasSize = UDim2.new(0, 0, 0, 0)
-easingDropdown.AutomaticCanvasSize = Enum.AutomaticSize.Y
-easingDropdown.Visible = false
-easingDropdown.ZIndex = 20
-easingDropdown.Active = true
-easingDropdown.Parent = settingsPanel
-addCorner(easingDropdown, 8)
-addStroke(easingDropdown, COLORS.border, 1)
-addPadding(easingDropdown, 5, 5, 5, 5)
-
-local easingDropdownLayout = Instance.new("UIListLayout")
-easingDropdownLayout.SortOrder = Enum.SortOrder.LayoutOrder
-easingDropdownLayout.Padding = UDim.new(0, 3)
-easingDropdownLayout.Parent = easingDropdown
 
 local settingsLoopRow = Instance.new("Frame")
 settingsLoopRow.Size = UDim2.new(1, 0, 0, 24)
 settingsLoopRow.BackgroundTransparency = 1
-settingsLoopRow.LayoutOrder = 7
+settingsLoopRow.LayoutOrder = 6
 settingsLoopRow.ZIndex = 11
 settingsLoopRow.Parent = settingsList
 local loopRowLabel = makeLabel(settingsLoopRow, "Loop Playback", UDim2.new(0, settingsLabelWidth, 1, 0), nil, isTouchDevice and 11 or 13)
@@ -1313,31 +1087,19 @@ loopRowLabel.ZIndex = 11
 local settingsLoopBtn = makeButton(settingsLoopRow, "Off", UDim2.new(1, -(settingsLabelWidth + 4), 1, 0), UDim2.new(0, settingsLabelWidth + 4, 0, 0))
 settingsLoopBtn.ZIndex = 11
 
-local countdownRow = Instance.new("Frame")
-countdownRow.Size = UDim2.new(1, 0, 0, 24)
-countdownRow.BackgroundTransparency = 1
-countdownRow.LayoutOrder = 8
-countdownRow.ZIndex = 11
-countdownRow.Parent = settingsList
-local countdownRowLabel = makeLabel(countdownRow, "Countdown (s)", UDim2.new(0, settingsLabelWidth, 1, 0), nil, isTouchDevice and 11 or 13)
-countdownRowLabel.ZIndex = 11
-local countdownSecondsBox = makeTextBox(countdownRow, "3", UDim2.new(1, -(settingsLabelWidth + 4), 1, 0), UDim2.new(0, settingsLabelWidth + 4, 0, 0))
-countdownSecondsBox.Text = tostring(countdownSeconds)
-countdownSecondsBox.ZIndex = 11
-
-local applySettingsBtn = makeButton(settingsList, "Apply Settings", UDim2.new(1, 0, 0, isTouchDevice and 25 or 28), nil, COLORS.success)
-applySettingsBtn.LayoutOrder = 9
+local applySettingsBtn = makeButton(settingsList, "Apply Settings", UDim2.new(1, 0, 0, isTouchDevice and 25 or 28), nil, COLORS.accent)
+applySettingsBtn.LayoutOrder = 7
 applySettingsBtn.ZIndex = 11
 
 -- Data (export / import) section
 local dataLabel = makeLabel(settingsList, "KEYFRAME DATA (JSON)", UDim2.new(1, 0, 0, 16), nil, 12)
 dataLabel.Font = Enum.Font.GothamBold
 dataLabel.TextColor3 = COLORS.muted
-dataLabel.LayoutOrder = 10
+dataLabel.LayoutOrder = 8
 dataLabel.ZIndex = 11
 
-local exportBtn = makeButton(settingsList, "Export Keyframes", UDim2.new(1, 0, 0, 26), nil, COLORS.accent)
-exportBtn.LayoutOrder = 11
+local exportBtn = makeButton(settingsList, "Export Keyframes", UDim2.new(1, 0, 0, 26), nil)
+exportBtn.LayoutOrder = 9
 exportBtn.ZIndex = 11
 
 local jsonBox = Instance.new("TextBox")
@@ -1353,50 +1115,19 @@ jsonBox.TextXAlignment = Enum.TextXAlignment.Left
 jsonBox.TextYAlignment = Enum.TextYAlignment.Top
 jsonBox.PlaceholderText = "Exported JSON appears here. Paste JSON here and press Import to load it."
 jsonBox.PlaceholderColor3 = COLORS.muted
-jsonBox.LayoutOrder = 12
+jsonBox.LayoutOrder = 10
 jsonBox.ZIndex = 11
 jsonBox.Parent = settingsList
-addCorner(jsonBox, 5)
+addCorner(jsonBox, 4)
 addStroke(jsonBox, COLORS.border, 1)
 
-local importBtn = makeButton(settingsList, "Import Keyframes", UDim2.new(1, 0, 0, isTouchDevice and 23 or 26), nil, COLORS.accent)
-importBtn.LayoutOrder = 13
+local importBtn = makeButton(settingsList, "Import Keyframes", UDim2.new(1, 0, 0, isTouchDevice and 23 or 26), nil)
+importBtn.LayoutOrder = 11
 importBtn.ZIndex = 11
 
 local dataStatusLabel = makeLabel(settingsList, "", UDim2.new(1, 0, 0, 16), nil, 12)
-dataStatusLabel.LayoutOrder = 14
+dataStatusLabel.LayoutOrder = 12
 dataStatusLabel.ZIndex = 11
-
--- Populate the easing picker now that drawCurveInto/EASING_MODES exist.
-local easingDropdownButtons = {}
-for _, modeName in ipairs(EASING_MODES) do
-	local row = makeButton(easingDropdown, modeName, UDim2.new(1, 0, 0, isTouchDevice and 22 or 24))
-	row.ZIndex = 21
-	row.TextXAlignment = Enum.TextXAlignment.Left
-	addPadding(row, 8, 0, 8, 0)
-	easingDropdownButtons[modeName] = row
-end
-
--- Selecting a curve from the picker list.
-for modeName, row in pairs(easingDropdownButtons) do
-	row.Activated:Connect(function()
-		for i, m in ipairs(EASING_MODES) do
-			if m == modeName then
-				easingModeIndex = i
-				easingMode = m
-				break
-			end
-		end
-		easingBtn.Text = "Ease: " .. easingMode
-		settingsEasingBtn.Text = easingMode
-		refreshCurveGraph()
-		easingDropdown.Visible = false
-	end)
-end
-
-settingsEasingBtn.Activated:Connect(function()
-	easingDropdown.Visible = not easingDropdown.Visible
-end)
 
 ----------------------------------------------------------------------
 -- MOBILE TOUCH CONTROLS (joystick + up/down buttons)
@@ -1558,7 +1289,7 @@ minimizedBar.Visible = false
 minimizedBar.ZIndex = 5
 minimizedBar.Active = true
 minimizedBar.Parent = screenGui
-addCorner(minimizedBar, 9)
+addCorner(minimizedBar, 8)
 addStroke(minimizedBar, COLORS.border, 1)
 
 local miniAccent = makeFrame(minimizedBar, UDim2.new(0, 3, 1, -10), UDim2.new(0, 4, 0, 5), COLORS.accent)
@@ -1569,7 +1300,7 @@ local minimizedLabel = makeLabel(minimizedBar, "CAMERA EDITOR", UDim2.new(1, -82
 minimizedLabel.ZIndex = 6
 minimizedLabel.Active = true -- Drag the bar by holding its title area.
 
-local restoreBtn = makeButton(minimizedBar, "OPEN", UDim2.new(0, 42, 0, 24), UDim2.new(1, -68, 0, 3), COLORS.success)
+local restoreBtn = makeButton(minimizedBar, "OPEN", UDim2.new(0, 42, 0, 24), UDim2.new(1, -68, 0, 3), COLORS.accentDim)
 restoreBtn.TextSize = isTouchDevice and 9 or 10
 restoreBtn.ZIndex = 6
 
@@ -1637,124 +1368,13 @@ reopenBubble.Parent = screenGui
 addCorner(reopenBubble, 24)
 addStroke(reopenBubble, COLORS.border, 1)
 
-----------------------------------------------------------------------
--- COUNTDOWN OVERLAY (shown before playback starts)
-----------------------------------------------------------------------
-local countdownOverlay = Instance.new("Frame")
-countdownOverlay.Size = UDim2.new(1, 0, 1, 0)
-countdownOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
-countdownOverlay.BackgroundTransparency = 0.35
-countdownOverlay.Visible = false
-countdownOverlay.ZIndex = 30
-countdownOverlay.Active = true
-countdownOverlay.Parent = rootFrame
-
-local countdownLabel = Instance.new("TextLabel")
-countdownLabel.Size = UDim2.new(0, 160, 0, 160)
-countdownLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-countdownLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
-countdownLabel.BackgroundTransparency = 1
-countdownLabel.TextColor3 = COLORS.warning
-countdownLabel.Font = Enum.Font.GothamBold
-countdownLabel.TextSize = 96
-countdownLabel.Text = "3"
-countdownLabel.ZIndex = 31
-countdownLabel.Parent = countdownOverlay
-
-local countdownHintLabel = makeLabel(countdownOverlay, "Tap Stop to cancel", UDim2.new(1, 0, 0, 20), UDim2.new(0, 0, 0.5, 90), 13, Enum.TextXAlignment.Center)
-countdownHintLabel.TextColor3 = COLORS.muted
-countdownHintLabel.ZIndex = 31
-
-----------------------------------------------------------------------
--- HELP OVERLAY (keyboard / touch control cheat-sheet)
-----------------------------------------------------------------------
-local helpBackdrop = Instance.new("Frame")
-helpBackdrop.Size = UDim2.new(1, 0, 1, 0)
-helpBackdrop.BackgroundColor3 = Color3.new(0, 0, 0)
-helpBackdrop.BackgroundTransparency = 0.5
-helpBackdrop.Visible = false
-helpBackdrop.ZIndex = 10
-helpBackdrop.Active = true
-helpBackdrop.Parent = rootFrame
-
-local helpPanel = makeFrame(
-	helpBackdrop,
-	isTouchDevice and UDim2.new(0.86, 0, 0.6, 0) or UDim2.new(0, 340, 0, 300),
-	isTouchDevice and UDim2.new(0.07, 0, 0.2, 0) or UDim2.new(0.5, -170, 0.5, -150),
-	COLORS.panel
-)
-helpPanel.ZIndex = 11
-helpPanel.Active = true
-addCorner(helpPanel, 12)
-addStroke(helpPanel, COLORS.border, 1)
-addPadding(helpPanel, 14, 14, 14, 14)
-
-local helpTitle = makeLabel(helpPanel, "CONTROLS", UDim2.new(1, -30, 0, 22), nil, 16)
-helpTitle.Font = Enum.Font.GothamBold
-helpTitle.ZIndex = 11
-
-local helpCloseBtn = makeButton(helpPanel, "X", UDim2.new(0, 26, 0, 22), UDim2.new(1, -26, 0, 0), COLORS.danger)
-helpCloseBtn.ZIndex = 11
-
-local helpBody = Instance.new("TextLabel")
-helpBody.Size = UDim2.new(1, 0, 1, -34)
-helpBody.Position = UDim2.new(0, 0, 0, 34)
-helpBody.BackgroundTransparency = 1
-helpBody.TextColor3 = COLORS.muted
-helpBody.Font = Enum.Font.Gotham
-helpBody.TextSize = isTouchDevice and 12 or 13
-helpBody.TextWrapped = true
-helpBody.TextXAlignment = Enum.TextXAlignment.Left
-helpBody.TextYAlignment = Enum.TextYAlignment.Top
-helpBody.ZIndex = 11
-helpBody.Parent = helpPanel
-helpBody.Text = isTouchDevice
-	and "Thumbstick: move\nUP / DOWN: rise / fall\nDrag empty view: look around\n+ Key / - Key: add / remove keyframe\nTwo-finger tap: stop playback"
-	or "W A S D: move\nE / Q: up / down\nRight Mouse + drag: look around\nShift: speed boost, Wheel: adjust speed\nSpace: play / pause\nDelete: remove selected keyframe\nCtrl + D: duplicate selected keyframe\nEsc: stop playback"
-
-----------------------------------------------------------------------
--- RESPONSIVE RELAYOUT (keeps the editor filling the screen with no
--- leftover gaps on every PC and mobile resolution / orientation)
-----------------------------------------------------------------------
-local function relayout()
-	local size = rootFrame.AbsoluteSize
-	local sw, sh = size.X, size.Y
-	if sw <= 0 or sh <= 0 then return end
-
-	leftPanelWidth = isTouchDevice
-		and clamp(math.floor(sw * 0.42), 150, 230)
-		or clamp(math.floor(sw * 0.19), 220, 320)
-	timelineHeight = isTouchDevice
-		and clamp(math.floor(sh * 0.23), 96, 136)
-		or clamp(math.floor(sh * 0.20), 140, 180)
-
-	leftPanel.Size = UDim2.new(0, leftPanelWidth, 1, -toolbarHeight - timelineHeight)
-	leftPanel.Position = UDim2.new(0, 0, 0, toolbarHeight)
-
-	timeline.Size = UDim2.new(1, 0, 0, timelineHeight)
-	timeline.Position = UDim2.new(0, 0, 1, -timelineHeight)
-
-	joystickBase.Position = UDim2.new(0, leftPanelWidth + 8, 1, -(timelineHeight + joystickSize + 10))
-	upBtn.Position = UDim2.new(1, -80, 1, -(timelineHeight + 46))
-	downBtn.Position = UDim2.new(1, -40, 1, -(timelineHeight + 46))
-
-	refreshRuler()
-	refreshTimelineMarkers()
-	updatePlayheadVisual()
-end
-
-rootFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout)
-relayout()
-
 	return {
 		rootFrame = rootFrame,
 		playBtn = playBtn,
 		pauseBtn = pauseBtn,
 		stopBtn = stopBtn,
 		addKeyBtn = addKeyBtn,
-		removeKeyBtn = removeKeyBtn,
 		settingsBtn = settingsBtn,
-		helpBtn = helpBtn,
 		minimizeBtn = minimizeBtn,
 		closeBtn = closeBtn,
 		posXBox = posXBox,
@@ -1785,7 +1405,6 @@ relayout()
 		settingsSpeedBox = settingsSpeedBox,
 		settingsEasingBtn = settingsEasingBtn,
 		settingsLoopBtn = settingsLoopBtn,
-		countdownSecondsBox = countdownSecondsBox,
 		applySettingsBtn = applySettingsBtn,
 		exportBtn = exportBtn,
 		jsonBox = jsonBox,
@@ -1795,10 +1414,6 @@ relayout()
 		restoreBtn = restoreBtn,
 		minimizedCloseBtn = minimizedCloseBtn,
 		reopenBubble = reopenBubble,
-		countdownOverlay = countdownOverlay,
-		countdownLabel = countdownLabel,
-		helpBackdrop = helpBackdrop,
-		helpCloseBtn = helpCloseBtn,
 	}
 end
 
@@ -1929,14 +1544,12 @@ local function openEditor()
 	refreshTimelineMarkers()
 	refreshSelectedPanel()
 	refreshRuler()
-	refreshCurveGraph()
 	updatePlayheadVisual()
 	updateTimeDisplays()
 end
 
 local function closeEditor()
 	if not editorOpen then return end
-	if countdownActive and cancelCountdown then cancelCountdown() end
 	restoreAllPlaybackGuis()
 	editorOpen = false
 	editorOpenRef = false
@@ -1947,13 +1560,11 @@ local function closeEditor()
 	UI.minimizedBar.Visible = false
 	UI.reopenBubble.Visible = true
 	UI.settingsBackdrop.Visible = false
-	UI.helpBackdrop.Visible = false
 	stopRenderLoop()
 	restoreOriginalCamera()
 	-- Reset transient input state so nothing "sticks" after closing.
 	moveState = { forward = false, backward = false, left = false, right = false, up = false, down = false }
 	shiftHeld = false
-	ctrlHeld = false
 	rightMouseDown = false
 	resetJoystick()
 	touchLookActive = false
@@ -1965,7 +1576,6 @@ local function minimizeEditor()
 	UI.rootFrame.Visible = false
 	UI.minimizedBar.Visible = true
 	UI.settingsBackdrop.Visible = false
-	UI.helpBackdrop.Visible = false
 	-- Keep the render loop running so the camera stays scriptable and
 	-- in place while minimized, but movement input still works if desired.
 end
@@ -2005,47 +1615,6 @@ local function playPlayback()
 	isPaused = false
 end
 
--- Shows a short countdown over the still-visible editor UI, then hides every
--- GUI (including the two core Roblox topbar buttons) and starts playback.
-local function runCountdownThenPlay()
-	if #keyframes == 0 then return end
-	if countdownActive then return end
-
-	local seconds = math.floor(countdownSeconds)
-	if seconds <= 0 then
-		playPlayback()
-		return
-	end
-
-	countdownActive = true
-	local cancelled = false
-	cancelCountdown = function()
-		cancelled = true
-		countdownActive = false
-		UI.countdownOverlay.Visible = false
-	end
-
-	UI.countdownOverlay.Visible = true
-	local remaining = seconds
-
-	local function tick()
-		if cancelled then return end
-		if remaining <= 0 then
-			UI.countdownOverlay.Visible = false
-			countdownActive = false
-			playPlayback()
-			return
-		end
-		UI.countdownLabel.Text = tostring(remaining)
-		UI.countdownLabel.Size = UDim2.new(0, 190, 0, 190)
-		local tween = TweenService:Create(UI.countdownLabel, TweenInfo.new(0.9, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(0, 160, 0, 160) })
-		tween:Play()
-		remaining = remaining - 1
-		task.delay(1, tick)
-	end
-	tick()
-end
-
 local function pausePlayback()
 	if isPlaying then
 		isPaused = true
@@ -2059,7 +1628,6 @@ local function resumePlayback()
 end
 
 local function stopPlayback()
-	if countdownActive and cancelCountdown then cancelCountdown() end
 	isPlaying = false
 	isPaused = false
 	seekTo(0)
@@ -2068,22 +1636,10 @@ end
 
 local function restartPlayback()
 	if #keyframes == 0 then return end
-	if countdownActive and cancelCountdown then cancelCountdown() end
 	currentTime = 0
 	hideAllPlaybackGuis()
 	isPlaying = true
 	isPaused = false
-end
-
--- Shared by the toolbar Play button and the Space shortcut.
-local function handlePlayButtonPress()
-	if isPlaying and isPaused then
-		resumePlayback()
-	elseif isPlaying then
-		pausePlayback()
-	else
-		runCountdownThenPlay()
-	end
 end
 
 local function gotoPreviousKeyframe()
@@ -2128,7 +1684,6 @@ local function exportKeyframes()
 		duration = duration,
 		easing = easingMode,
 		loop = loopPlayback,
-		countdown = countdownSeconds,
 		keyframes = {},
 	}
 	for _, kf in ipairs(keyframes) do
@@ -2219,10 +1774,6 @@ local function importKeyframes()
 		UI.loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
 		UI.settingsLoopBtn.Text = loopPlayback and "On" or "Off"
 	end
-	if type(result.countdown) == "number" then
-		countdownSeconds = clamp(math.floor(result.countdown), 0, 15)
-		UI.countdownSecondsBox.Text = tostring(countdownSeconds)
-	end
 	if type(result.easing) == "string" then
 		for i, mode in ipairs(EASING_MODES) do
 			if mode == result.easing then
@@ -2239,7 +1790,6 @@ local function importKeyframes()
 	refreshTimelineMarkers()
 	refreshRuler()
 	refreshSelectedPanel()
-	refreshCurveGraph()
 	seekTo(0)
 
 	UI.dataStatusLabel.Text = "Imported " .. #newKeyframes .. " keyframe(s)."
@@ -2251,23 +1801,20 @@ end
 ----------------------------------------------------------------------
 
 -- Toolbar
-UI.playBtn.Activated:Connect(handlePlayButtonPress)
+UI.playBtn.Activated:Connect(function()
+	if isPlaying and isPaused then
+		resumePlayback()
+	else
+		playPlayback()
+	end
+end)
 UI.pauseBtn.Activated:Connect(pausePlayback)
 UI.stopBtn.Activated:Connect(stopPlayback)
 UI.addKeyBtn.Activated:Connect(function()
 	addKeyframe(currentTime, freeCamCFrame, currentFOV)
 end)
-UI.removeKeyBtn.Activated:Connect(quickRemoveKeyframe)
 UI.settingsBtn.Activated:Connect(function()
 	UI.settingsBackdrop.Visible = not UI.settingsBackdrop.Visible
-	UI.helpBackdrop.Visible = false
-end)
-UI.helpBtn.Activated:Connect(function()
-	UI.helpBackdrop.Visible = not UI.helpBackdrop.Visible
-	UI.settingsBackdrop.Visible = false
-end)
-UI.helpCloseBtn.Activated:Connect(function()
-	UI.helpBackdrop.Visible = false
 end)
 UI.minimizeBtn.Activated:Connect(minimizeEditor)
 UI.closeBtn.Activated:Connect(closeEditor)
@@ -2283,9 +1830,7 @@ UI.restartBtn.Activated:Connect(restartPlayback)
 UI.loopBtn.Activated:Connect(function()
 	loopPlayback = not loopPlayback
 	UI.loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
-	UI.loopBtn.BackgroundColor3 = loopPlayback and COLORS.accent or COLORS.buttonBg
 	UI.settingsLoopBtn.Text = loopPlayback and "On" or "Off"
-	UI.settingsLoopBtn.BackgroundColor3 = loopPlayback and COLORS.accent or COLORS.buttonBg
 end)
 
 UI.easingBtn.Activated:Connect(function()
@@ -2293,7 +1838,6 @@ UI.easingBtn.Activated:Connect(function()
 	easingMode = EASING_MODES[easingModeIndex]
 	UI.easingBtn.Text = "Ease: " .. easingMode
 	UI.settingsEasingBtn.Text = easingMode
-	refreshCurveGraph()
 end)
 
 UI.durationBox.FocusLost:Connect(function(enterPressed)
@@ -2323,12 +1867,17 @@ UI.settingsCloseBtn.Activated:Connect(function()
 	UI.settingsBackdrop.Visible = false
 end)
 
+UI.settingsEasingBtn.Activated:Connect(function()
+	easingModeIndex = (easingModeIndex % #EASING_MODES) + 1
+	easingMode = EASING_MODES[easingModeIndex]
+	UI.easingBtn.Text = "Ease: " .. easingMode
+	UI.settingsEasingBtn.Text = easingMode
+end)
+
 UI.settingsLoopBtn.Activated:Connect(function()
 	loopPlayback = not loopPlayback
 	UI.loopBtn.Text = isTouchDevice and (loopPlayback and "Loop On" or "Loop Off") or (loopPlayback and "Loop: On" or "Loop: Off")
-	UI.loopBtn.BackgroundColor3 = loopPlayback and COLORS.accent or COLORS.buttonBg
 	UI.settingsLoopBtn.Text = loopPlayback and "On" or "Off"
-	UI.settingsLoopBtn.BackgroundColor3 = loopPlayback and COLORS.accent or COLORS.buttonBg
 end)
 
 UI.applySettingsBtn.Activated:Connect(function()
@@ -2355,12 +1904,6 @@ UI.applySettingsBtn.Activated:Connect(function()
 		UI.speedBox.Text = tostring(playbackSpeed)
 	end
 	UI.settingsSpeedBox.Text = tostring(playbackSpeed)
-
-	local cd = tonumber(UI.countdownSecondsBox.Text)
-	if cd and cd >= 0 then
-		countdownSeconds = clamp(math.floor(cd), 0, 15)
-	end
-	UI.countdownSecondsBox.Text = tostring(countdownSeconds)
 end)
 
 UI.exportBtn.Activated:Connect(exportKeyframes)
@@ -2403,31 +1946,7 @@ end)
 
 UI.duplicateBtn.Activated:Connect(duplicateKeyframe)
 UI.deleteBtn.Activated:Connect(deleteSelectedKeyframe)
-
--- Clear All requires a confirming second tap within 3 seconds (safety against
--- accidentally wiping every keyframe with one stray touch).
-local clearAllArmed = false
-local clearAllArmTimer = nil
-UI.clearAllBtn.Activated:Connect(function()
-	if #keyframes == 0 then return end
-	if not clearAllArmed then
-		clearAllArmed = true
-		UI.clearAllBtn.Text = "Tap again to confirm"
-		UI.clearAllBtn.BackgroundColor3 = COLORS.danger
-		if clearAllArmTimer then task.cancel(clearAllArmTimer) end
-		clearAllArmTimer = task.delay(3, function()
-			clearAllArmed = false
-			UI.clearAllBtn.Text = "Clear All Keyframes"
-			UI.clearAllBtn.BackgroundColor3 = COLORS.dangerDim
-		end)
-	else
-		clearAllArmed = false
-		if clearAllArmTimer then task.cancel(clearAllArmTimer) end
-		UI.clearAllBtn.Text = "Clear All Keyframes"
-		UI.clearAllBtn.BackgroundColor3 = COLORS.dangerDim
-		clearAllKeyframes()
-	end
-end)
+UI.clearAllBtn.Activated:Connect(clearAllKeyframes)
 
 ----------------------------------------------------------------------
 -- KEYBOARD / MOUSE INPUT (desktop)
@@ -2454,31 +1973,17 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		local key = input.KeyCode
-		if key == Enum.KeyCode.Escape then
-			if countdownActive then
-				if cancelCountdown then cancelCountdown() end
-			elseif isPlaying then
-				stopPlayback()
-			end
+		if isPlaying and key == Enum.KeyCode.Escape then
+			stopPlayback()
 			return
 		end
-		if key == Enum.KeyCode.Space then
-			handlePlayButtonPress()
-			return
-		end
-		if not isPlaying then
-			if key == Enum.KeyCode.W then moveState.forward = true
-			elseif key == Enum.KeyCode.S then moveState.backward = true
-			elseif key == Enum.KeyCode.A then moveState.left = true
-			elseif key == Enum.KeyCode.D then
-				if ctrlHeld then duplicateKeyframe() else moveState.right = true end
-			elseif key == Enum.KeyCode.E then moveState.up = true
-			elseif key == Enum.KeyCode.Q then moveState.down = true
-			elseif key == Enum.KeyCode.Delete or key == Enum.KeyCode.Backspace then
-				deleteSelectedKeyframe()
-			elseif key == Enum.KeyCode.LeftShift or key == Enum.KeyCode.RightShift then shiftHeld = true
-			elseif key == Enum.KeyCode.LeftControl or key == Enum.KeyCode.RightControl then ctrlHeld = true
-			end
+		if key == Enum.KeyCode.W then moveState.forward = true
+		elseif key == Enum.KeyCode.S then moveState.backward = true
+		elseif key == Enum.KeyCode.A then moveState.left = true
+		elseif key == Enum.KeyCode.D then moveState.right = true
+		elseif key == Enum.KeyCode.E then moveState.up = true
+		elseif key == Enum.KeyCode.Q then moveState.down = true
+		elseif key == Enum.KeyCode.LeftShift or key == Enum.KeyCode.RightShift then shiftHeld = true
 		end
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 		if not isPlaying then
@@ -2503,7 +2008,6 @@ UserInputService.InputEnded:Connect(function(input)
 		elseif key == Enum.KeyCode.E then moveState.up = false
 		elseif key == Enum.KeyCode.Q then moveState.down = false
 		elseif key == Enum.KeyCode.LeftShift or key == Enum.KeyCode.RightShift then shiftHeld = false
-		elseif key == Enum.KeyCode.LeftControl or key == Enum.KeyCode.RightControl then ctrlHeld = false
 		end
 	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 		rightMouseDown = false
@@ -2587,7 +2091,6 @@ refreshRuler()
 refreshKeyframeList()
 refreshTimelineMarkers()
 refreshSelectedPanel()
-refreshCurveGraph()
 updatePlayheadVisual()
 updateTimeDisplays()
 openEditor()
