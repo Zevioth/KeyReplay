@@ -2868,4 +2868,12 @@ refreshKeyframeList(); refreshTimelineMarkers(); refreshSelectedPanel(); refresh
 relayout()
 openEditor()
 
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "FramePlay",
+        Text = "Replay Plug-In Installed",
+        Duration = 5,
+    })
+end)
+
 print("[FramePlay] Upgraded editor started. /replay hides or shows the interface.")
